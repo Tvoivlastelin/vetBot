@@ -1,0 +1,29 @@
+# Файлы с секретами и окружением
+.env
+.env.*
+*.env
+
+# Python (кеш и сборки)
+__pycache__/
+*.py[cod]
+*.so
+.Python
+venv/
+env/
+.venv/
+Lib/
+Scripts/
+
+# IDEs (PyCharm, VS Code)
+.idea/
+.vscode/
+*.swp
+
+# Логи и базы данных
+*.log
+*.db
+*.sqlite3
+
+# Файлы переменных окружения на сервере (если скачаете локально)
+.env.production
+.env.local

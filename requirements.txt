@@ -1,0 +1,5 @@
+aiogram
+supabase
+aiohttp
+python-dotenv
+aiohttp-socks
