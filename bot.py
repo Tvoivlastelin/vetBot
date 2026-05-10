@@ -618,27 +618,8 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
-# Импортируем библиотеку для создания веб-сервера
-from aiohttp import web
-
-async def health_check(request):
-    return web.Response(text="Бот работает!")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get('/health', health_check) # Создаем endpoint для проверки
-    runner = web.AppRunner(app)
-    await runner.setup()
-    # Порт берем из переменной окружения, который мы добавили на Koyeb
-    port = int(os.getenv('PORT', 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    print(f"Веб-сервер для health-чеков запущен на порту {port}")
-
-# Изменим функцию main, чтобы она запускала оба сервера
 async def main():
-    asyncio.create_task(start_web_server())   # Фоновый запуск веб-сервера
-    asyncio.create_task(reminder_scheduler()) # Ваш планировщик напоминаний
+    asyncio.create_task(reminder_scheduler())
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
