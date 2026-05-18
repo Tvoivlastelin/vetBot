@@ -5,6 +5,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, date
 from typing import Dict, Optional
+from yookassa import Configuration, Payment
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -14,7 +15,7 @@ from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    Message, CallbackQuery, LabeledPrice, PreCheckoutQuery,
+    Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -28,15 +29,18 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ADMIN_IDS = list(map(int, os.getenv("ADMINS", "").split(","))) if os.getenv("ADMINS") else []
 
-SUBSCRIPTION_PRICE_STARS = 250
-CONSULT_PRICE_STARS = 500
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
+if YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY:
+    Configuration.account_id = YOOKASSA_SHOP_ID
+    Configuration.secret_key = YOOKASSA_SECRET_KEY
 
 # ---------- Инициализация ----------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-pending_kupikod: Dict[str, dict] = {}
+pending_payments: Dict[str, dict] = {}
 
 # ---------- FSM состояния ----------
 class Registration(StatesGroup):
@@ -174,8 +178,28 @@ def activate_subscription(user_id: int, days: int = 30):
                 new_end_referrer = max(current_end, datetime.now(current_end.tzinfo)) + timedelta(days=90)
             else:
                 new_end_referrer = datetime.now() + timedelta(days=90)
-            supabase.table("users").update({"subscription_end": new_end_referrer.isoformat()}).eq("user_id",
-                                                                                                  referrer_id).execute()
+            supabase.table("users").update({"subscription_end": new_end_referrer.isoformat()}).eq("user_id", referrer_id).execute()
+
+def create_yookassa_payment(user_id: int, amount: float, description: str, payment_type: str = "subscription") -> str:
+    """Создаёт платёж в ЮKassa и возвращает ссылку для оплаты"""
+    payment = Payment.create({
+        "amount": {
+            "value": str(amount),
+            "currency": "RUB"
+        },
+        "confirmation": {
+            "type": "redirect",
+            "return_url": "https://t.me/Sovetaibot"  # замените на ссылку вашего бота
+        },
+        "capture": True,
+        "description": description,
+        "metadata": {
+            "user_id": str(user_id),
+            "payment_type": payment_type
+        }
+    })
+    return payment.confirmation.confirmation_url, payment.id
+
 def clean_answer(text: str) -> str:
     """Постобработка ответа ИИ: удаление мусора, нормализация пробелов."""
     text = re.sub(r'```[\s\S]*?```', '', text)
@@ -273,16 +297,14 @@ def main_menu_keyboard():
 
 def subscription_methods_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="⭐️ Оплатить Stars", callback_data="pay_stars")
-    builder.button(text="📱 Оплатить с баланса телефона", callback_data="pay_phone_subscription")
+    builder.button(text="💳 Оплатить картой (250 ₽)", callback_data="pay_rubles")  # новая кнопка
     builder.button(text="◀️ Назад", callback_data="back_to_main")
     builder.adjust(1)
     return builder.as_markup()
 
 def consult_payment_methods_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="⭐️ Оплатить Stars (500)", callback_data="consult_pay_stars")
-    builder.button(text="📱 Оплатить с баланса телефона", callback_data="consult_pay_phone")
+    builder.button(text="💳 Оплатить 500 ₽", callback_data="consult_pay_rubles")
     builder.button(text="◀️ Назад", callback_data="back_to_main")
     builder.adjust(1)
     return builder.as_markup()
@@ -341,7 +363,6 @@ async def cmd_ask(message: Message, state: FSMContext):
     await message.answer("Напишите ваш вопрос о здоровье питомца (max 500 символов):")
     await state.set_state(AskState.waiting_for_question)
 
-
 @dp.message(AskState.waiting_for_question)
 async def handle_question(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -356,7 +377,7 @@ async def handle_question(message: Message, state: FSMContext):
         if used >= 3:
             await message.answer(
                 "❌ **У вас закончились бесплатные вопросы.**\n\n"
-                "Оформите подписку за 250 руб/мес:\n"
+                "Оформите подписку за 250 ₽/мес:\n"
                 "• Безлимитные вопросы к ИИ\n"
                 "• 1 бесплатная консультация с врачом в месяц\n"
                 "• Напоминания о вакцинациях\n\n"
@@ -382,85 +403,43 @@ async def handle_question(message: Message, state: FSMContext):
     supabase.table("ai_requests").insert({"user_id": user_id, "question": question, "response": answer}).execute()
     await state.clear()
 
-# ----- Подписка Stars -----
-@dp.callback_query(F.data == "pay_stars")
-async def pay_stars_callback(callback: CallbackQuery):
-    await bot.send_invoice(
-        chat_id=callback.from_user.id,
-        title="🐾 Месячная подписка",
-        description="Безлимитные вопросы + напоминания",
-        payload="month_subscription_stars",
-        provider_token="",
-        currency="XTR",
-        prices=[LabeledPrice(label="1 месяц", amount=SUBSCRIPTION_PRICE_STARS)],
-        start_parameter="sub_stars",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"⭐️ Оплатить {SUBSCRIPTION_PRICE_STARS} Stars", pay=True)]
-        ])
+# ----- Подписка rubles -----
+@dp.callback_query(F.data == "pay_rubles")
+async def pay_rubles_callback(callback: CallbackQuery):
+    """Оплата подписки рублями через ЮKassa"""
+    user_id = callback.from_user.id
+    amount = 250.00
+
+    payment_url, payment_id = create_yookassa_payment(
+        user_id=user_id,
+        amount=amount,
+        description=f"Подписка для пользователя {user_id}",
+        payment_type="subscription"
+    )
+
+    pending_payments[payment_id] = {"user_id": user_id, "type": "subscription"}
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Оплатить 250 ₽", url=payment_url)],
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"check_payment_{payment_id}")]  # ← изменил
+    ])
+
+    await callback.message.edit_text(
+        "💰 **Оплата подписки**\n\n"
+        "Стоимость: 250 ₽\n\n"
+        "Нажмите на кнопку, чтобы оплатить картой или через СБП.\n\n"
+        "После оплаты нажмите 'Я оплатил' для проверки.",
+        reply_markup=kb
     )
     await callback.answer()
 
-@dp.pre_checkout_query()
-async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
-    await pre_checkout_query.answer(ok=True)
-
-@dp.message(F.successful_payment)
-async def process_successful_payment(message: Message):
-    user_id = message.from_user.id
-    payload = message.successful_payment.invoice_payload
-    if payload == "month_subscription_stars":
-        activate_subscription(user_id, days=30)
-        await message.answer("✅ Подписка активирована на 30 дней!", reply_markup=main_menu_keyboard())
-    elif payload.startswith("consult_"):
-        consult_id = int(payload.split("_")[1])
-        supabase.table("consult_requests").update({"status": "paid"}).eq("id", consult_id).execute()
-        await message.answer("✅ Оплата получена! Теперь опишите проблему и пришлите фото.")
-        await state.set_state(ConsultStates.waiting_for_question)
-        await state.update_data(consult_id=consult_id)
-
 @dp.message(Command("subscribe"))
 async def cmd_subscribe(message: Message):
-    # Показываем выбор способа оплаты (как и в кнопке)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐️ Оплатить Stars", callback_data="pay_stars")],
-        [InlineKeyboardButton(text="📱 Оплатить с баланса телефона", callback_data="pay_phone_subscription")]
+        [InlineKeyboardButton(text="💳 Оплатить 250 ₽", callback_data="pay_rubles")]
     ])
-    await message.answer("Выберите способ оплаты подписки (250 руб/мес):", reply_markup=kb)
+    await message.answer("Оплата подписки (250 ₽/мес):", reply_markup=kb)
 
-# ----- Подписка с баланса телефона -----
-@dp.callback_query(F.data == "pay_phone_subscription")
-async def pay_phone_subscription(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    payment_id = str(uuid.uuid4())
-    pending_kupikod[payment_id] = {"user_id": user_id, "type": "subscription"}
-    payment_url = "https://kupikod.com/pay?amount=250&order_id=" + payment_id  # замените
-    text = "📱 Оплата подписки с баланса телефона\n1. Перейдите по ссылке\n2. Оплатите 250 руб\n3. Нажмите 'Я оплатил'"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Перейти к оплате", url=payment_url)],
-        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"verify_kupikod_{payment_id}")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="subscription_menu")]
-    ])
-    await callback.message.answer(text, parse_mode="Markdown", reply_markup=kb)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("verify_kupikod_"))
-async def verify_kupikod(callback: CallbackQuery, state: FSMContext):
-    payment_id = callback.data.split("_")[2]
-    payment_data = pending_kupikod.get(payment_id)
-    if not payment_data or payment_data["user_id"] != callback.from_user.id:
-        await callback.answer("Неверный запрос.", show_alert=True)
-        return
-    if payment_data["type"] == "subscription":
-        activate_subscription(callback.from_user.id, days=30)
-        await callback.message.answer("✅ Подписка активирована!", reply_markup=main_menu_keyboard())
-    elif payment_data["type"] == "consult":
-        consult_id = payment_data["consult_id"]
-        supabase.table("consult_requests").update({"status": "paid"}).eq("id", consult_id).execute()
-        await state.update_data(consult_id=consult_id)
-        await callback.message.answer("✅ Оплата получена! Теперь напишите вопрос и фото (/finish_consult)")
-        await state.set_state(ConsultStates.waiting_for_question)
-    del pending_kupikod[payment_id]
-    await callback.answer()
 
 # ----- Консультация с врачом -----
 @dp.message(Command("doctor_consult"))
@@ -489,36 +468,33 @@ async def cmd_doctor_consult(message: Message, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"🎁 Бесплатная консультация (осталось: {free_consults})",
                                   callback_data="use_free_consult")],
-            [InlineKeyboardButton(text="💳 Оплатить Stars (500)", callback_data="consult_pay_stars")],
-            [InlineKeyboardButton(text="📱 Оплатить с баланса телефона", callback_data="consult_pay_phone")],
+            [InlineKeyboardButton(text="💳 Оплатить 500 ₽", callback_data="consult_pay_rubles")],
             [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_main")]
         ])
         await message.answer(
             f"🩺 **Консультация с ветеринаром**\n\n"
             f"У вас есть **{free_consults}** бесплатная(ых) консультация(ий) по подписке!\n"
             f"Каждый месяц подписки даёт +1 бесплатную консультацию.\n\n"
-            f"💰 Платная консультация: 500 руб\n\n"
+            f"💰 Платная консультация: 500 ₽\n\n"
             f"Выберите способ оплаты:",
             reply_markup=kb,
             parse_mode="Markdown"
         )
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Оплатить Stars (500)", callback_data="consult_pay_stars")],
-            [InlineKeyboardButton(text="📱 Оплатить с баланса телефона", callback_data="consult_pay_phone")],
+            [InlineKeyboardButton(text="💳 Оплатить 500 ₽", callback_data="consult_pay_rubles")],
             [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_main")]
         ])
         await message.answer(
             "🩺 **Консультация с ветеринаром**\n\n"
-            "💰 Стоимость: 500 руб\n\n"
-            "💡 **Совет:** Оформите подписку за 250 руб/мес и получайте 1 бесплатную консультацию каждый месяц!\n\n"
-            "Выберите способ оплаты:",
+            "💰 Стоимость: 500 ₽\n\n"
+            "💡 **Совет:** Оформите подписку за 250 ₽/мес и получайте 1 бесплатную консультацию каждый месяц!\n\n"
+            "Нажмите на кнопку для оплаты:",
             reply_markup=kb,
             parse_mode="Markdown"
         )
 
     await state.set_state(ConsultStates.choosing_doctor)
-
 
 @dp.callback_query(F.data == "doctor_consult")
 async def doctor_consult_callback(callback: CallbackQuery, state: FSMContext):
@@ -547,37 +523,34 @@ async def doctor_consult_callback(callback: CallbackQuery, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"🎁 Бесплатная консультация (осталось: {free_consults})",
                                   callback_data="use_free_consult")],
-            [InlineKeyboardButton(text="💳 Оплатить Stars (500)", callback_data="consult_pay_stars")],
-            [InlineKeyboardButton(text="📱 Оплатить с баланса телефона", callback_data="consult_pay_phone")],
+            [InlineKeyboardButton(text="💳 Оплатить 500 ₽", callback_data="consult_pay_rubles")],
             [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_main")]
         ])
         await callback.message.edit_text(
             f"🩺 **Консультация с ветеринаром**\n\n"
             f"У вас есть **{free_consults}** бесплатная(ых) консультация(ий) по подписке!\n"
             f"Каждый месяц подписки даёт +1 бесплатную консультацию.\n\n"
-            f"💰 Платная консультация: 500 руб\n\n"
+            f"💰 Платная консультация: 500 ₽\n\n"
             f"Выберите способ оплаты:",
             reply_markup=kb,
             parse_mode="Markdown"
         )
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Оплатить Stars (500)", callback_data="consult_pay_stars")],
-            [InlineKeyboardButton(text="📱 Оплатить с баланса телефона", callback_data="consult_pay_phone")],
+            [InlineKeyboardButton(text="💳 Оплатить 500 ₽", callback_data="consult_pay_rubles")],
             [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_to_main")]
         ])
         await callback.message.edit_text(
             "🩺 **Консультация с ветеринаром**\n\n"
-            "💰 Стоимость: 500 руб\n\n"
-            "💡 **Совет:** Оформите подписку за 250 руб/мес и получайте 1 бесплатную консультацию каждый месяц!\n\n"
-            "Выберите способ оплаты:",
+            "💰 Стоимость: 500 ₽\n\n"
+            "💡 **Совет:** Оформите подписку за 250 ₽/мес и получайте 1 бесплатную консультацию каждый месяц!\n\n"
+            "Нажмите на кнопку для оплаты:",
             reply_markup=kb,
             parse_mode="Markdown"
         )
 
     await state.set_state(ConsultStates.choosing_doctor)
     await callback.answer()
-
 
 @dp.callback_query(F.data == "use_free_consult")
 async def use_free_consult(callback: CallbackQuery, state: FSMContext):
@@ -628,6 +601,93 @@ async def use_free_consult(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(ConsultStates.waiting_for_question)
     await callback.answer()
+
+
+@dp.callback_query(F.data == "consult_pay_rubles")
+async def consult_pay_rubles(callback: CallbackQuery, state: FSMContext):
+    """Оплата консультации рублями через ЮKassa"""
+    user_id = callback.from_user.id
+    data = await state.get_data()
+    doctor_id = data.get("selected_doctor_id")
+
+    if not doctor_id:
+        await callback.message.answer("❌ Ошибка: выберите врача заново.")
+        return
+
+    # Создаём заявку со статусом waiting_payment
+    res = supabase.table("consult_requests").insert({
+        "user_id": user_id,
+        "doctor_id": doctor_id,
+        "status": "waiting_payment",
+        "payment_method": "yookassa"
+    }).execute()
+    consult_id = res.data[0]["id"]
+    await state.update_data(consult_id=consult_id)
+
+    amount = 500.00
+    payment_url, payment_id = create_yookassa_payment(
+        user_id=user_id,
+        amount=amount,
+        description=f"Консультация #{consult_id} для пользователя {user_id}",
+        payment_type="consult"
+    )
+
+    pending_payments[payment_id] = {"user_id": user_id, "type": "consult", "consult_id": consult_id}
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Перейти к оплате 500 ₽", url=payment_url)],
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"check_payment_{payment_id}")]
+    ])
+
+    await callback.message.edit_text(
+        "💰 **Оплата консультации**\n\n"
+        "Стоимость: 500 ₽\n\n"
+        "Нажмите на кнопку, чтобы оплатить картой или через СБП.\n"
+        "После оплаты нажмите 'Я оплатил'.",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("check_payment_"))
+async def check_payment(callback: CallbackQuery, state: FSMContext):
+    payment_id = callback.data.split("_")[2]
+    payment_data = pending_payments.get(payment_id)
+
+    if not payment_data:
+        await callback.answer("Платёж не найден.", show_alert=True)
+        return
+
+    try:
+        payment = Payment.find_one(payment_id)
+
+        if payment.status == "succeeded":
+            user_id = payment_data["user_id"]
+
+            if payment_data["type"] == "subscription":
+                activate_subscription(user_id, days=30)
+                await callback.message.answer("✅ Подписка активирована! Спасибо за оплату.")
+                await callback.message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+
+            elif payment_data["type"] == "consult":
+                consult_id = payment_data["consult_id"]
+                supabase.table("consult_requests").update({"status": "paid"}).eq("id", consult_id).execute()
+                await callback.message.answer(
+                    "✅ **Оплата получена!**\n\n"
+                    "Теперь опишите проблему и пришлите фото (1-3).\n"
+                    "Для завершения отправьте /finish_consult"
+                )
+                await state.set_state(ConsultStates.waiting_for_question)
+                await state.update_data(consult_id=consult_id)
+
+            del pending_payments[payment_id]
+        else:
+            await callback.answer(f"❌ Платёж ещё не завершён. Статус: {payment.status}", show_alert=True)
+    except Exception as e:
+        await callback.answer(f"Ошибка проверки: {str(e)}", show_alert=True)
+
+    await callback.answer()
+
 
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
@@ -686,7 +746,6 @@ async def select_doctor(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Стоимость 500 руб. Выберите способ оплаты:", reply_markup=consult_payment_methods_keyboard())
     await callback.answer()
 
-
 @dp.message(Command("questions"))
 async def cmd_questions(message: Message):
     """Показать остаток бесплатных вопросов"""
@@ -710,109 +769,6 @@ async def cmd_questions(message: Message):
         text += "💡 Задайте вопрос командой /ask"
 
     await message.answer(text, parse_mode="Markdown")
-
-@dp.callback_query(F.data == "use_free_consult")
-async def use_free_consult(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    user = get_user(user_id)
-    free_consults = user.get("free_consultations", 0)
-
-    if free_consults <= 0:
-        await callback.message.answer("У вас нет бесплатных консультаций. Выберите платный вариант.")
-        await callback.answer()
-        return
-
-    # Уменьшаем счётчик бесплатных консультаций
-    supabase.table("users").update({"free_consultations": free_consults - 1}).eq("user_id", user_id).execute()
-
-    # Создаём заявку со статусом "paid" (бесплатно)
-    data = await state.get_data()
-    doctor_id = data.get("selected_doctor_id")
-
-    if not doctor_id:
-        # Если врач не выбран, выбираем первого доступного
-        doctors = supabase.table("doctors").select("id").eq("is_available", True).execute()
-        if not doctors.data:
-            await callback.message.answer("Нет доступных врачей. Попробуйте позже.")
-            return
-        doctor_id = doctors.data[0]["id"]
-        await state.update_data(selected_doctor_id=doctor_id)
-
-    res = supabase.table("consult_requests").insert({
-        "user_id": user_id,
-        "doctor_id": doctor_id,
-        "status": "paid",
-        "payment_method": "free_subscription"
-    }).execute()
-
-    consult_id = res.data[0]["id"]
-    await state.update_data(consult_id=consult_id)
-
-    await callback.message.answer(
-        "✅ **Бесплатная консультация активирована!**\n\n"
-        "Теперь опишите проблему и пришлите фото (1-3).\n"
-        "Для завершения отправьте /finish_consult",
-        parse_mode="Markdown"
-    )
-    await state.set_state(ConsultStates.waiting_for_question)
-    await callback.answer()
-
-@dp.callback_query(F.data == "consult_pay_stars")
-async def consult_pay_stars(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    doctor_id = data.get("selected_doctor_id")
-    if not doctor_id:
-        await callback.message.answer("Ошибка: выберите врача заново.")
-        return
-    res = supabase.table("consult_requests").insert({
-        "user_id": callback.from_user.id,
-        "doctor_id": doctor_id,
-        "status": "waiting_payment",
-        "payment_method": "stars"
-    }).execute()
-    consult_id = res.data[0]["id"]
-    await state.update_data(consult_id=consult_id)
-    await bot.send_invoice(
-        chat_id=callback.from_user.id,
-        title="Консультация ветеринара",
-        description="Ответ врача в течение 4 часов",
-        payload=f"consult_{consult_id}",
-        provider_token="",
-        currency="XTR",
-        prices=[LabeledPrice(label="Консультация", amount=CONSULT_PRICE_STARS)],
-        start_parameter="consult",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"⭐️ Оплатить {CONSULT_PRICE_STARS} Stars", pay=True)]
-        ])
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "consult_pay_phone")
-async def consult_pay_phone(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    doctor_id = data.get("selected_doctor_id")
-    if not doctor_id:
-        await callback.message.answer("Ошибка: выберите врача заново.")
-        return
-    res = supabase.table("consult_requests").insert({
-        "user_id": callback.from_user.id,
-        "doctor_id": doctor_id,
-        "status": "waiting_payment",
-        "payment_method": "phone"
-    }).execute()
-    consult_id = res.data[0]["id"]
-    await state.update_data(consult_id=consult_id)
-    payment_id = str(uuid.uuid4())
-    pending_kupikod[payment_id] = {"user_id": callback.from_user.id, "type": "consult", "consult_id": consult_id}
-    payment_url = "https://kupikod.com/pay?amount=500&order_id=" + payment_id
-    text = "📱 Оплата консультации с баланса телефона\n1. Перейдите по ссылке\n2. Оплатите 500 руб\n3. Нажмите 'Я оплатил'"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Перейти к оплате", url=payment_url)],
-        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"verify_kupikod_{payment_id}")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="doctor_consult")]
-    ])
-    await callback.message.answer(text, parse_mode="Markdown", reply_markup=kb)
-    await callback.answer()
 
 @dp.message(ConsultStates.waiting_for_question, F.text)
 async def collect_consult_question(message: Message, state: FSMContext):
@@ -1080,8 +1036,9 @@ async def back_to_main(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "subscription_menu")
 async def subscription_menu(callback: CallbackQuery):
-    await callback.message.edit_text("Выберите способ оплаты подписки (250 руб/мес):", reply_markup=subscription_methods_keyboard())
+    await callback.message.edit_text("Выберите способ оплаты подписки (250 ₽/мес):", reply_markup=subscription_methods_keyboard())
     await callback.answer()
+
 
 # ----- Планировщик напоминаний -----
 async def reminder_scheduler():
