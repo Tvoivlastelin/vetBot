@@ -18,6 +18,8 @@ from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
+from aiogram.enums import ParseMode  # ← исправлено
+from aiogram.client.default import DefaultBotProperties  # ← добавлено
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from supabase import create_client, Client
 import aiohttp
@@ -1507,11 +1509,52 @@ async def reminder_scheduler():
         await asyncio.sleep(60)
 
 # ----- Запуск -----
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 async def main():
+    # Создаём бота с правильными настройками
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
+    # Ваш dp уже создан в начале файла, используем его
+    # (dp = Dispatcher() у вас уже есть)
+
+    # Запускаем планировщик напоминаний (как у вас было)
     asyncio.create_task(reminder_scheduler())
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+
+    # Режим работы
+    if os.getenv("WEBHOOK_MODE", "False").lower() == "true":
+        # === ВЕБХУК РЕЖИМ (для Bothost) ===
+        WEBHOOK_PATH = "/webhook"
+        WEB_SERVER_HOST = "0.0.0.0"
+        WEB_SERVER_PORT = int(os.getenv("PORT", 8080))
+        BASE_WEBHOOK_URL = os.getenv("BASE_WEBHOOK_URL")  # например: https://ваш_проект.bothost.ru
+
+        async def on_startup():
+            await bot.set_webhook(f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
+            print(f"✅ Вебхук установлен: {BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
+
+        async def on_shutdown():
+            await bot.delete_webhook()
+            print("✅ Вебхук удалён")
+
+        dp.startup.register(on_startup)
+        dp.shutdown.register(on_shutdown)
+
+        app = web.Application()
+        webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+        webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+        setup_application(app, dp, bot=bot)
+
+        print(f"🚀 Запуск веб-сервера на порту {WEB_SERVER_PORT}")
+        web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
+    else:
+        # === POLLING РЕЖИМ (для локальной разработки) ===
+        await bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Запуск в режиме polling")
+        await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    import asyncio
+
     asyncio.run(main())
