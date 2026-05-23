@@ -35,6 +35,8 @@ if YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY:
     Configuration.account_id = YOOKASSA_SHOP_ID
     Configuration.secret_key = YOOKASSA_SECRET_KEY
 
+BOT_USERNAME = "Sovetaibot"  # username вашего бота (без @)
+
 # ---------- Инициализация ----------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -44,6 +46,7 @@ pending_payments: Dict[str, dict] = {}
 
 # ---------- FSM состояния ----------
 class Registration(StatesGroup):
+    waiting_for_pet_name = State()
     waiting_for_pet_type = State()
     waiting_for_pet_age = State()
 
@@ -58,6 +61,13 @@ class ConsultStates(StatesGroup):
 
 class AskState(StatesGroup):
     waiting_for_question = State()
+
+class ViewPhotoStates(StatesGroup):
+    waiting_for_user_id = State()
+
+class FeedbackStates(StatesGroup):
+    waiting_for_message = State()
+    waiting_for_rating = State()
 
 # ---------- Работа с БД ----------
 def get_user(user_id: int) -> Optional[dict]:
@@ -180,8 +190,8 @@ def activate_subscription(user_id: int, days: int = 30):
                 new_end_referrer = datetime.now() + timedelta(days=90)
             supabase.table("users").update({"subscription_end": new_end_referrer.isoformat()}).eq("user_id", referrer_id).execute()
 
-def create_yookassa_payment(user_id: int, amount: float, description: str, payment_type: str = "subscription") -> str:
-    """Создаёт платёж в ЮKassa и возвращает ссылку для оплаты"""
+def create_yookassa_payment(user_id: int, amount: float, description: str, payment_type: str = "subscription") -> tuple:
+    """Создаёт платёж в ЮKassa и возвращает (url, payment_id)"""
     payment = Payment.create({
         "amount": {
             "value": str(amount),
@@ -189,7 +199,7 @@ def create_yookassa_payment(user_id: int, amount: float, description: str, payme
         },
         "confirmation": {
             "type": "redirect",
-            "return_url": "https://t.me/Sovetaibot"  # замените на ссылку вашего бота
+            "return_url": f"https://t.me/{BOT_USERNAME}?start=payment_return"
         },
         "capture": True,
         "description": description,
@@ -199,7 +209,6 @@ def create_yookassa_payment(user_id: int, amount: float, description: str, payme
         }
     })
     return payment.confirmation.confirmation_url, payment.id
-
 def clean_answer(text: str) -> str:
     """Постобработка ответа ИИ: удаление мусора, нормализация пробелов."""
     text = re.sub(r'```[\s\S]*?```', '', text)
@@ -287,11 +296,12 @@ async def ask_ai(question: str, user_id: int, pet_info: str = "") -> str:
 # ---------- Клавиатуры ----------
 def main_menu_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="❓ Задать вопрос", callback_data="ask_question")
+    builder.button(text="❓ Задать вопрос ИИ", callback_data="ask_question")
     builder.button(text="⭐️ Подписка", callback_data="subscription_menu")
     builder.button(text="🔔 Напоминания", callback_data="reminders_menu")
     builder.button(text="👥 Реферальная программа", callback_data="referral_info")
     builder.button(text="🩺 Консультация с врачом", callback_data="doctor_consult")
+    builder.button(text="💬 Обратная связь", callback_data="feedback")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -329,11 +339,20 @@ async def cmd_start(message: Message, state: FSMContext):
     if not user:
         create_user(user_id, username, referrer_id)
         await message.answer(
-            "🐾 Добро пожаловать! Давайте заполним анкету питомца.\nКакой у вас вид питомца? (собака, кошка и т.д.)"
+            "🐾 Добро пожаловать! Давайте заполним анкету питомца.\n"
+            "Как зовут вашего питомца?"
         )
-        await state.set_state(Registration.waiting_for_pet_type)
+        await state.set_state(Registration.waiting_for_pet_name)
     else:
         await message.answer("С возвращением! Используйте меню.", reply_markup=main_menu_keyboard())
+
+
+@dp.message(Registration.waiting_for_pet_name)
+async def process_pet_name(message: Message, state: FSMContext):
+    await state.update_data(pet_name=message.text)
+    await message.answer("Какой у вас вид питомца? (собака, кошка и т.д.)")
+    await state.set_state(Registration.waiting_for_pet_type)
+
 
 @dp.message(Registration.waiting_for_pet_type)
 async def process_pet_type(message: Message, state: FSMContext):
@@ -344,11 +363,25 @@ async def process_pet_type(message: Message, state: FSMContext):
 @dp.message(Registration.waiting_for_pet_age)
 async def process_pet_age(message: Message, state: FSMContext):
     data = await state.get_data()
+
+    # Проверяем, что все данные собраны
+    if not data.get('pet_name') or not data.get('pet_type'):
+        await message.answer("❌ Что-то пошло не так. Пожалуйста, начните заново с /start")
+        await state.clear()
+        return
+
     supabase.table("users").update({
+        "pet_name": data['pet_name'],
         "pet_type": data['pet_type'],
         "pet_age": message.text
     }).eq("user_id", message.from_user.id).execute()
-    await message.answer("✅ Анкета сохранена! У вас есть 3 бесплатных вопроса.", reply_markup=main_menu_keyboard())
+
+    await message.answer(
+        f"✅ Анкета сохранена!\n\n"
+        f"🐾 Питомец: {data['pet_name']} ({data['pet_type']}, {message.text} лет)\n\n"
+        f"У вас есть 3 бесплатных вопроса.",
+        reply_markup=main_menu_keyboard()
+    )
     await state.clear()
 
 # ----- Вопросы -----
@@ -363,8 +396,14 @@ async def cmd_ask(message: Message, state: FSMContext):
     await message.answer("Напишите ваш вопрос о здоровье питомца (max 500 символов):")
     await state.set_state(AskState.waiting_for_question)
 
+
 @dp.message(AskState.waiting_for_question)
 async def handle_question(message: Message, state: FSMContext):
+    # Если пользователь ввел команду — выходим из режима ожидания вопроса
+    if message.text.startswith('/'):
+        await state.clear()
+        return  # Команда обработается своим хендлером
+
     user_id = message.from_user.id
     question = message.text.strip()
     if len(question) > 500:
@@ -388,7 +427,6 @@ async def handle_question(message: Message, state: FSMContext):
             await state.clear()
             return
 
-        # Показываем остаток перед вопросом
         await message.answer(
             f"🤔 Думаю...\n\n💡 У вас осталось **{remaining}** бесплатных вопросов. После этого потребуется подписка.")
         increment_free_questions(user_id)
@@ -396,8 +434,10 @@ async def handle_question(message: Message, state: FSMContext):
         await message.answer("🤔 Думаю... (безлимит по подписке)")
 
     user_data = get_user(user_id)
-    pet_info = f"Вид: {user_data.get('pet_type')}, Возраст: {user_data.get('pet_age')}" if user_data.get(
+    pet_name = user_data.get('pet_name', 'питомец')
+    pet_info = f"Кличка: {pet_name}, Вид: {user_data.get('pet_type')}, Возраст: {user_data.get('pet_age')}" if user_data.get(
         'pet_type') else ""
+
     answer = await ask_ai(question, user_id, pet_info)
     await message.answer(answer)
     supabase.table("ai_requests").insert({"user_id": user_id, "question": question, "response": answer}).execute()
@@ -592,16 +632,231 @@ async def use_free_consult(callback: CallbackQuery, state: FSMContext):
 
     consult_id = res.data[0]["id"]
     await state.update_data(consult_id=consult_id)
+    await state.update_data(photos=[])
 
     # Исправленное сообщение (без незакрытых форматирований)
     await callback.message.answer(
         "✅ БЕСПЛАТНАЯ КОНСУЛЬТАЦИЯ АКТИВИРОВАНА!\n\n"
-        "Теперь опишите проблему и пришлите фото (1-3).\n"
-        "Для завершения отправьте /finish_consult"
+        "Теперь опишите подробно проблему и отправьте ее в чат с ботом.\n"
     )
     await state.set_state(ConsultStates.waiting_for_question)
     await callback.answer()
 
+#обработчик обратной связи
+# ---------- Обратная связь ----------
+@dp.callback_query(F.data == "feedback")
+async def feedback_callback(callback: CallbackQuery, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_feedback")]
+    ])
+    await callback.message.answer(
+        "💬 **Обратная связь**\n\n"
+        "Напишите ваше сообщение, вопрос или предложение.\n"
+        "Если хотите оценить консультацию, укажите оценку от 1 до 5.\n\n"
+        "Пример: «Всё отлично, спасибо! Оценка: 5»",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+    await state.set_state(FeedbackStates.waiting_for_message)
+    await callback.answer()
+
+
+@dp.message(Command("feedback"))
+async def cmd_feedback(message: Message, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_feedback")]
+    ])
+    await message.answer(
+        "💬 **Обратная связь**\n\n"
+        "Напишите ваше сообщение, вопрос или предложение.\n"
+        "Если хотите оценить консультацию, укажите оценку от 1 до 5.\n\n"
+        "Пример: «Всё отлично, спасибо! Оценка: 5»",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+    await state.set_state(FeedbackStates.waiting_for_message)
+
+
+@dp.callback_query(F.data == "cancel_feedback")
+async def cancel_feedback(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("❌ Обратная связь отменена.")
+    await callback.answer()
+
+
+@dp.message(FeedbackStates.waiting_for_message)
+async def feedback_message_handler(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    text = message.text.strip()
+
+    if len(text) < 5:
+        await message.answer("Пожалуйста, напишите сообщение длиннее (минимум 5 символов).")
+        return
+
+    # Сохраняем сообщение в БД
+    supabase.table("feedback").insert({
+        "user_id": user_id,
+        "message": text,
+        "is_read": False
+    }).execute()
+
+    # Отправляем уведомление админам
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"💬 **Новое сообщение обратной связи!**\n\n"
+                f"👤 Пользователь: {message.from_user.full_name}\n"
+                f"🆔 ID: `{user_id}`\n"
+                f"📝 Сообщение: {text[:500]}",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+
+    await message.answer(
+        "✅ **Спасибо за ваше сообщение!**\n\n"
+        "Мы обязательно рассмотрим его и учтём для улучшения сервиса.",
+        parse_mode="Markdown"
+    )
+    await state.clear()
+
+@dp.message(Command("view_feedback"))
+async def view_feedback(message: Message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        await message.answer("❌ У вас нет доступа к этой команде.")
+        return
+
+    # Получаем непрочитанные сообщения
+    res = supabase.table("feedback").select("*").eq("is_read", False).order("created_at", desc=True).execute()
+
+    if not res.data:
+        await message.answer("📭 Новых сообщений обратной связи нет.")
+        return
+
+    for fb in res.data:
+        # Получаем информацию о пользователе
+        user_info = supabase.table("users").select("username").eq("user_id", fb["user_id"]).execute()
+        username = user_info.data[0]["username"] if user_info.data else "нет username"
+
+        created_at = fb["created_at"][:16] if fb["created_at"] else "неизвестно"
+
+        text = (
+            f"💬 Сообщение #{fb['id']}\n"
+            f"👤 Пользователь: {fb['user_id']} (@{username})\n"
+            f"📅 Дата: {created_at}\n"
+            f"📝 Сообщение: {fb['message'][:300]}\n"
+        )
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Отметить как прочитанное", callback_data=f"mark_feedback_read_{fb['id']}")],
+            [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_feedback_{fb['id']}")]
+        ])
+
+        # Убираем parse_mode, так как в тексте есть спецсимволы
+        await message.answer(text, reply_markup=kb)
+
+    await message.answer("📌 Для ответа пользователю используйте /reply [user_id] [сообщение]")
+
+@dp.callback_query(F.data.startswith("mark_feedback_read_"))
+async def mark_feedback_read(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    feedback_id = int(callback.data.split("_")[3])
+    supabase.table("feedback").update({"is_read": True}).eq("id", feedback_id).execute()
+
+    await callback.message.edit_text(callback.message.text + "\n\n✅ Отмечено как прочитанное")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("delete_feedback_"))
+async def delete_feedback(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    feedback_id = int(callback.data.split("_")[2])
+    supabase.table("feedback").delete().eq("id", feedback_id).execute()
+
+    await callback.message.delete()
+    await callback.answer("Сообщение удалено", show_alert=True)
+
+
+@dp.message(Command("reply"))
+async def reply_to_user(message: Message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        await message.answer("❌ У вас нет доступа.")
+        return
+
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Формат: /reply [user_id] [текст ответа]")
+        return
+
+    try:
+        target_user_id = int(parts[1])
+        reply_text = parts[2]
+    except:
+        await message.answer("❌ Неверный формат ID пользователя.")
+        return
+
+    try:
+        await bot.send_message(
+            target_user_id,
+            f"📝 **Ответ от администратора:**\n\n{reply_text}\n\n"
+            f"💡 Если у вас остались вопросы, вы можете задать их через /ask",
+            parse_mode="Markdown"
+        )
+        await message.answer(f"✅ Ответ отправлен пользователю {target_user_id}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при отправке: {str(e)}")
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        await message.answer("❌ У вас нет доступа к этой команде.")
+        return
+
+    # Всего пользователей
+    users = supabase.table("users").select("user_id", count="exact").execute()
+
+    # Активные за 7 дней (уникальные пользователи, которые задавали вопросы)
+    week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+    active_requests = supabase.table("ai_requests").select("user_id").gte("created_at", week_ago).execute()
+    unique_active_users = len(set([r["user_id"] for r in active_requests.data])) if active_requests.data else 0
+
+    # Вопросы к ИИ (всего строк)
+    questions = supabase.table("ai_requests").select("id", count="exact").execute()
+
+    # Консультации
+    consults = supabase.table("consult_requests").select("id", count="exact").execute()
+
+    # Непрочитанные отзывы
+    feedback_unread = supabase.table("feedback").select("id", count="exact").eq("is_read", False).execute()
+
+    # Активные подписки
+    subscriptions = supabase.table("users").select("user_id", count="exact").gt("subscription_end",
+                                                                                datetime.now().isoformat()).execute()
+
+    text = (
+        f"📊 **Статистика бота**\n\n"
+        f"👥 Всего пользователей: {users.count}\n"
+        f"✅ Активных за 7 дней: {unique_active_users}\n"
+        f"💳 Активных подписок: {subscriptions.count}\n"
+        f"❓ Вопросов к ИИ: {questions.count}\n"
+        f"🩺 Консультаций: {consults.count}\n"
+        f"💬 Непрочитанных отзывов: {feedback_unread.count}\n"
+    )
+
+    await message.answer(text, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "consult_pay_rubles")
 async def consult_pay_rubles(callback: CallbackQuery, state: FSMContext):
@@ -623,6 +878,7 @@ async def consult_pay_rubles(callback: CallbackQuery, state: FSMContext):
     }).execute()
     consult_id = res.data[0]["id"]
     await state.update_data(consult_id=consult_id)
+    await state.update_data(photos=[])
 
     amount = 500.00
     payment_url, payment_id = create_yookassa_payment(
@@ -674,11 +930,11 @@ async def check_payment(callback: CallbackQuery, state: FSMContext):
                 supabase.table("consult_requests").update({"status": "paid"}).eq("id", consult_id).execute()
                 await callback.message.answer(
                     "✅ **Оплата получена!**\n\n"
-                    "Теперь опишите проблему и пришлите фото (1-3).\n"
-                    "Для завершения отправьте /finish_consult"
+                    "Теперь опишите подробно проблему и отправьте ее в чат с ботом.\n"
                 )
                 await state.set_state(ConsultStates.waiting_for_question)
                 await state.update_data(consult_id=consult_id)
+                await state.update_data(photos=[])  # инициализация списка фото
 
             del pending_payments[payment_id]
         else:
@@ -688,7 +944,119 @@ async def check_payment(callback: CallbackQuery, state: FSMContext):
 
     await callback.answer()
 
+#запрос фото по ID для врачей и админов
+@dp.message(Command("get_photos"))
+async def cmd_get_photos(message: Message, state: FSMContext):
+    # Проверяем права доступа
+    user_id = message.from_user.id
+    is_super_admin = user_id in ADMIN_IDS
 
+    if not is_super_admin:
+        doctor = supabase.table("doctors").select("id").eq("tg_user_id", user_id).execute()
+        if not doctor.data:
+            await message.answer("❌ У вас нет доступа к этой команде. Только для врачей.")
+            return
+
+    await message.answer(
+        "🔍 **Поиск консультаций**\n\n"
+        "Введите Telegram ID пользователя, чтобы посмотреть все его консультации с фото:",
+        parse_mode="Markdown"
+    )
+    await state.set_state(ViewPhotoStates.waiting_for_user_id)
+
+
+@dp.message(ViewPhotoStates.waiting_for_user_id)
+async def get_photos_by_user_id(message: Message, state: FSMContext):
+    # Проверяем, что введено число
+    if not message.text.isdigit():
+        await message.answer("❌ Введите числовой Telegram ID пользователя.")
+        return
+
+    target_user_id = int(message.text.strip())
+
+    # Получаем все консультации пользователя
+    res = supabase.table("consult_requests").select("id, doctor_id, photos, question, status, created_at").eq("user_id",
+                                                                                                              target_user_id).order(
+        "id", desc=True).execute()
+
+    if not res.data:
+        await message.answer(f"❌ Консультации для пользователя с ID `{target_user_id}` не найдены.",
+                             parse_mode="Markdown")
+        await state.clear()
+        return
+
+    # Проверка прав доступа для врачей (не админов)
+    # Проверка прав доступа для врачей (не админов)
+    current_user_id = message.from_user.id
+    is_super_admin = current_user_id in ADMIN_IDS
+
+    if not is_super_admin:
+        doctor = supabase.table("doctors").select("id").eq("tg_user_id", current_user_id).execute()
+        doctor_id = doctor.data[0]["id"] if doctor.data else None
+
+        # Фильтруем только свои консультации
+        consultations = [c for c in res.data if c["doctor_id"] == doctor_id]
+        if not consultations:
+            await message.answer(f"❌ У вас нет доступа к консультациям пользователя `{target_user_id}`.",
+                                 parse_mode="Markdown")
+            await state.clear()
+            return
+        # Ограничиваем до 5 последних консультаций для врачей
+        consultations = consultations[:5]
+    else:
+        # Для админов тоже ограничиваем до 5, чтобы не перегружать бота
+        consultations = res.data[:5]
+
+    # Получаем информацию о пользователе
+    user_info = supabase.table("users").select("username, pet_type, pet_age, pet_name").eq("user_id",
+                                                                                           target_user_id).execute()
+    pet_info = ""
+    if user_info.data:
+        pet_name = user_info.data[0].get('pet_name', 'не указана')
+        pet_type = user_info.data[0].get('pet_type', 'не указан')
+        pet_age = user_info.data[0].get('pet_age', 'не указан')
+        pet_info = f"🐾 Питомец: {pet_name} ({pet_type}, {pet_age} лет)"
+
+    await message.answer(
+        f"📋 **Консультации пользователя**\n\n"
+        f"👤 ID: `{target_user_id}`\n"
+        f"{pet_info}\n"
+        f"📊 Всего консультаций: {len(consultations)}\n\n"
+        f"⬇️ Подробности ниже:",
+        parse_mode="Markdown"
+    )
+
+    # Отправляем каждую консультацию отдельно
+    for consult in consultations:
+        consult_id = consult["id"]
+        question_raw = consult.get("question") or "Нет вопроса"
+        question = question_raw[:200] if len(question_raw) > 200 else question_raw
+        status = consult["status"]
+        created_at_raw = consult.get("created_at")
+        created_at = created_at_raw[:16] if created_at_raw else "неизвестно"
+        photos = consult.get("photos", [])
+
+        status_emoji = "✅" if status == "paid" else "⏳" if status == "waiting_payment" else "📝" if status == "answered" else "❓"
+
+        await message.answer(
+            f"🆔 Консультация #{consult_id}\n"
+            f"📅 Дата: {created_at}\n"
+            f"📝 Вопрос: {question}...\n"
+            f"📸 Фото: {len(photos)} шт.\n"
+            f"Статус: {status_emoji} {status}",
+        )
+
+        # Отправляем фото, если есть
+        for i, file_id in enumerate(photos, 1):
+            await bot.send_photo(message.chat.id, file_id,
+                                 caption=f"Консультация #{consult_id}, фото {i}/{len(photos)}")
+            await asyncio.sleep(0.5)
+
+    await message.answer(
+        "✅ **Готово!**\n\n"
+        "Для поиска другой консультации снова используйте /get_photos"
+    )
+    await state.clear()
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
     user_id = message.from_user.id
@@ -719,7 +1087,11 @@ async def cmd_profile(message: Message):
     last_str = last_date_str if last_date_str else "—"
 
     # Формируем текст
+    pet_name = user.get('pet_name', 'не указана')
+    pet_type = user.get('pet_type', 'не указан')
+    pet_age = user.get('pet_age', 'не указан')
     text = f"👤 **Ваш профиль**\n\n"
+    text += f"🐾 **Питомец:** {pet_name} ({pet_type}, {pet_age} лет)\n\n"
     text += f"📅 Подписка: {status}\n"
     if is_sub_active:
         text += f"🗓️ Действует до: {end_str}\n"
@@ -745,6 +1117,56 @@ async def select_doctor(callback: CallbackQuery, state: FSMContext):
     await state.update_data(selected_doctor_id=doctor_id)
     await callback.message.answer("Стоимость 500 руб. Выберите способ оплаты:", reply_markup=consult_payment_methods_keyboard())
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("answer_consult_"))
+async def answer_consult_button(callback: CallbackQuery, state: FSMContext):
+    consult_id = int(callback.data.split("_")[2])
+    await state.update_data(answer_consult_id=consult_id)
+    await callback.message.answer(
+        f"Введите ответ для консультации #{consult_id}:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_answer")]
+        ])
+    )
+    await state.set_state("waiting_for_answer_text")
+    await callback.answer()
+
+@dp.callback_query(F.data == "cancel_answer")
+async def cancel_answer(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("❌ Ответ отменён.")
+    await callback.answer()
+
+@dp.message(StateFilter("waiting_for_answer_text"))
+async def process_answer_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    consult_id = data.get("answer_consult_id")
+    answer_text = message.text
+
+    # Проверяем права врача (как в /answer_consult)
+    doctor = supabase.table("doctors").select("id").eq("tg_user_id", message.from_user.id).execute()
+    if not doctor.data:
+        await message.answer("У вас нет прав.")
+        await state.clear()
+        return
+
+    # Обновляем заявку
+    res = supabase.table("consult_requests").update({
+        "status": "answered",
+        "doctor_answer": answer_text,
+        "answered_at": datetime.now().isoformat()
+    }).eq("id", consult_id).eq("doctor_id", doctor.data[0]["id"]).execute()
+
+    if not res.data:
+        await message.answer("Заявка не найдена или доступ запрещён.")
+        await state.clear()
+        return
+
+    user_id = res.data[0]["user_id"]
+    await bot.send_message(user_id, f"🩺 Ответ врача:\n\n{answer_text}\n\n⚠️ Консультация не заменяет очный осмотр.")
+    await message.answer(f"✅ Ответ отправлен пользователю (заявка #{consult_id})")
+    await state.clear()
 
 @dp.message(Command("questions"))
 async def cmd_questions(message: Message):
@@ -780,25 +1202,46 @@ async def collect_consult_question(message: Message, state: FSMContext):
     await state.update_data(consult_question=message.text)
     await message.answer(
         "✅ Вопрос сохранён.\n\n"
-        "Теперь можете отправить фото (1-3).\n"
+        "Теперь можете отправить фото (1-5).\n"
         "Или сразу нажмите /finish_consult"
     )
     await state.set_state(ConsultStates.waiting_for_photos)
+
 
 @dp.message(ConsultStates.waiting_for_photos, F.photo)
 async def collect_consult_photos(message: Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
+
+    # Проверяем лимит
+    if len(photos) >= 5:
+        await message.answer(
+            "❌ Вы уже добавили максимум 5 фото.\n\n"
+            "Лишние фото не будут сохранены.\n"
+            "Для завершения отправьте /finish_consult"
+        )
+        return  # Просто игнорируем лишние фото, не меняя состояние
+
+    # Добавляем фото
     file_id = message.photo[-1].file_id
     photos.append(file_id)
-    if len(photos) >= 3:
-        await state.update_data(photos=photos)
-        await message.answer("Максимум 3 фото. Завершите /finish_consult")
-        await state.set_state(ConsultStates.waiting_for_question)
-    else:
-        await state.update_data(photos=photos)
-        await message.answer(f"Фото добавлено ({len(photos)}/3). Можно ещё или /finish_consult")
+    await state.update_data(photos=photos)
 
+    remaining = 5 - len(photos)
+
+    if remaining > 0:
+        await message.answer(
+            f"✅ Фото добавлено ({len(photos)}/5)\n\n"
+            f"📸 Осталось места: {remaining}\n"
+            f"• Отправьте ещё фото или\n"
+            f"• Нажмите /finish_consult для завершения"
+        )
+    else:
+        # Достигнут лимит
+        await message.answer(
+            "✅ Максимум 5 фото получено!\n\n"
+            "Нажмите /finish_consult для завершения консультации."
+        )
 
 @dp.message(Command("finish_consult"))
 async def finish_consult(message: Message, state: FSMContext):
@@ -859,29 +1302,37 @@ async def finish_consult(message: Message, state: FSMContext):
         # Формируем сообщение врачу
         user = message.from_user
         pet_info = get_user(user_id)
-        pet_text = f"Вид: {pet_info.get('pet_type', 'не указан')}, Возраст: {pet_info.get('pet_age', 'не указан')}" if pet_info else "не указана"
-
+        pet_text = f"Кличка: {pet_info.get('pet_name', 'не указана')}, Вид: {pet_info.get('pet_type', 'не указан')}, Возраст: {pet_info.get('pet_age', 'не указан')}" if pet_info else "не указана"
+        user_link = f"tg://user?id={user_id}"
+        question_text = (question or "Вопрос не указан")[:500]  # безопасно
         text = (
             f"🆕 НОВАЯ КОНСУЛЬТАЦИЯ #{consult_id}\n\n"
             f"👤 Пользователь: {user.full_name}\n"
             f"🆔 ID: {user_id}\n"
+            f"🔗 Ссылка: [Написать пользователю]({user_link})\n"
             f"🐾 Питомец: {pet_text}\n\n"
-            f"📝 Вопрос:\n{question}\n"
+            f"📝 Вопрос:\n{question_text}\n"
+            f"💬 Чтобы ответить, используйте команду:\n"
+            f"`/answer_consult {consult_id} Ваш ответ`"
         )
-
+        # Создаём кнопку для ответа
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💬 Ответить на консультацию", callback_data=f"answer_consult_{consult_id}")]
+        ])
         # Отправляем врачу
         if photos:
-            await bot.send_photo(doctor_tg_id, photo=photos[0], caption=text)
+            await bot.send_photo(doctor_tg_id, photo=photos[0], caption=text, reply_markup=kb)
             if len(photos) > 1:
                 media = [types.InputMediaPhoto(media=photo) for photo in photos[1:]]
                 await bot.send_media_group(doctor_tg_id, media=media)
         else:
-            await bot.send_message(doctor_tg_id, text)
+            await bot.send_message(doctor_tg_id, text, reply_markup=kb)
 
         # Подтверждение пользователю
+        question_preview = (question or "Вопрос не указан")[:100]
         await message.answer(
             f"✅ **Запрос отправлен врачу!**\n\n"
-            f"📋 Ваш вопрос: {question[:100]}...\n"
+            f"📋 Ваш вопрос: {question_preview}...\n"
             f"📸 Фото: {len(photos)} шт.\n\n"
             f"👨‍⚕️ Врач {doctor_name} ответит вам в течение 4 часов.\n\n"
             f"Ответ придёт в этот чат.",
