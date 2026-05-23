@@ -27,4 +27,4 @@ Scripts/
 # Файлы переменных окружения на сервере (если скачаете локально)
 .env.production
 .env.local
-.pyvenv.cfg
+pyvenv.cfg
