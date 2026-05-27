@@ -1561,6 +1561,25 @@ async def yookassa_webhook(request):
         return web.Response(status=500)
 
 
+async def test_handler(request):
+    return web.Response(text="Webhook server works!")
+
+
+async def run_webhook_server():
+    """Запускает веб-сервер для вебхуков ЮKassa"""
+    app = web.Application()
+    app.router.add_get('/test', test_handler)  # ← тестовый маршрут
+    app.router.add_post('/webhook/yookassa', yookassa_webhook)
+
+    port = int(os.getenv('PORT', 8080))
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"🚀 Веб-сервер запущен на порту {port}")
+
+    await asyncio.Event().wait()
 async def run_webhook_server():
     """Запускает веб-сервер для вебхуков ЮKassa (в главном потоке)"""
     app = web.Application()
