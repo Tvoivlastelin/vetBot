@@ -1525,6 +1525,8 @@ async def reminder_scheduler():
 from aiohttp import web
 import json
 
+async def test_handler(request):
+    return web.Response(text="Webhook server works!")
 
 async def yookassa_webhook(request):
     """Обработчик входящих уведомлений от ЮKassa."""
@@ -1560,15 +1562,10 @@ async def yookassa_webhook(request):
         print(f"❌ Ошибка обработки вебхука: {e}")
         return web.Response(status=500)
 
-
-async def test_handler(request):
-    return web.Response(text="Webhook server works!")
-
-
 async def run_webhook_server():
     """Запускает веб-сервер для вебхуков ЮKassa"""
     app = web.Application()
-    app.router.add_get('/test', test_handler)  # ← тестовый маршрут
+    app.router.add_get('/test', test_handler)
     app.router.add_post('/webhook/yookassa', yookassa_webhook)
 
     port = int(os.getenv('PORT', 8080))
@@ -1580,39 +1577,17 @@ async def run_webhook_server():
     print(f"🚀 Веб-сервер запущен на порту {port}")
 
     await asyncio.Event().wait()
-async def run_webhook_server():
-    """Запускает веб-сервер для вебхуков ЮKassa (в главном потоке)"""
-    app = web.Application()
-    app.router.add_post('/webhook/yookassa', yookassa_webhook)
-
-    port = int(os.getenv('PORT', 8080))
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    print(f"🚀 Веб-сервер для вебхуков запущен на порту {port}")
-
-    # Бесконечно ждём (сервер работает)
-    await asyncio.Event().wait()
-
 
 # ----------------------------------------------------------------------
 # ---------- ЗАПУСК БОТА ----------
 # ----------------------------------------------------------------------
 
 async def main():
-    # Запускаем планировщик напоминаний
     asyncio.create_task(reminder_scheduler())
-
-    # Запускаем веб-сервер для вебхуков (в главном потоке)
-    asyncio.create_task(run_webhook_server())
-
-    # Очищаем вебхук Telegram и запускаем бота в режиме Polling
+    asyncio.create_task(run_webhook_server())  # ← теперь одна, правильная
     await bot.delete_webhook(drop_pending_updates=True)
     print("✅ Бот запущен в режиме Polling")
     await dp.start_polling(bot)
-
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
