@@ -1509,10 +1509,103 @@ async def reminder_scheduler():
         await asyncio.sleep(60)
 
 # ----- Запуск -----
+#async def main():
+    #asyncio.create_task(reminder_scheduler())
+    #await bot.delete_webhook(drop_pending_updates=True)
+    #await dp.start_polling(bot)
+
+#if __name__ == "__main__":
+    #asyncio.run(main())
+# ... (импорты, работа с БД, ваши старые хендлеры) ...
+
+# ----------------------------------------------------------------------
+# ---------- НАСТРОЙКА ВЕБХУКА ДЛЯ ЮKASSA ----------
+# ----------------------------------------------------------------------
+
+from aiohttp import web
+import json
+import asyncio
+
+
+async def yookassa_webhook(request):
+    """Обработчик входящих уведомлений от ЮKassa."""
+    try:
+        # 1. Получаем тело уведомления
+        body = await request.text()
+        event_data = json.loads(body)
+
+        # 2. Проверяем, что это уведомление об успешном платеже
+        if event_data.get('event') == 'payment.succeeded':
+            payment = event_data['object']
+            payment_id = payment['id']
+            metadata = payment.get('metadata', {})
+            user_id = int(metadata.get('user_id'))
+            payment_type = metadata.get('payment_type')
+
+            print(f"✅ Webhook: Успешный платеж {payment_id} от пользователя {user_id}, тип: {payment_type}")
+
+            # 3. Выполняем действия в зависимости от типа платежа
+            if payment_type == 'subscription':
+                # Активируем подписку
+                activate_subscription(user_id, days=30)
+                # Уведомляем пользователя
+                await bot.send_message(user_id, "✅ Ваша подписка активирована! Спасибо за оплату.")
+
+            elif payment_type == 'consult':
+                # Создаем заявку на консультацию
+                # Получаем doctor_id из metadata, или используем значение по умолчанию
+                doctor_id = int(metadata.get('doctor_id', 1))  # Замените 1 на ID вашего врача
+
+                # Создаем запись в БД
+                new_consult = supabase.table("consult_requests").insert({
+                    "user_id": user_id,
+                    "doctor_id": doctor_id,
+                    "status": "waiting_for_details",
+                    "payment_method": "yookassa_webhook"
+                }).execute()
+
+                # Уведомляем пользователя
+                await bot.send_message(user_id,
+                                       "✅ Оплата за консультацию получена! Теперь опишите вашу проблему и пришлите фото.")
+                # Здесь можно также уведомить врача, если нужно
+
+        # 4. Всегда возвращаем статус 200, чтобы ЮKassa не дублировала уведомления
+        return web.Response(status=200)
+
+    except Exception as e:
+        print(f"❌ Ошибка обработки вебхука: {e}")
+        # Возвращаем ошибку, чтобы ЮKassa попробовала отправить уведомление еще раз
+        return web.Response(status=500)
+
+
+def start_webhook_server():
+    """Запускает веб-сервер для приема вебхуков."""
+    app = web.Application()
+    app.router.add_post('/webhook/yookassa', yookassa_webhook)
+
+    # Получаем порт из переменной окружения, или используем 8080 по умолчанию
+    port = int(os.getenv('PORT', 8080))
+
+    web.run_app(app, host='0.0.0.0', port=port)
+
+
+# ----------------------------------------------------------------------
+# ---------- ЗАПУСК БОТА ----------
+# ----------------------------------------------------------------------
+
 async def main():
+    # Запускаем планировщик напоминаний
     asyncio.create_task(reminder_scheduler())
+
+    # Запускаем веб-сервер для вебхуков ЮKassa
+    asyncio.create_task(asyncio.to_thread(start_webhook_server))
+
+    # Очищаем вебхук Telegram и запускаем бота в режиме Polling
     await bot.delete_webhook(drop_pending_updates=True)
+    print("✅ Бот запущен в режиме Polling")
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
