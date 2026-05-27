@@ -1562,20 +1562,23 @@ async def yookassa_webhook(request):
         print(f"❌ Ошибка обработки вебхука: {e}")
         return web.Response(status=500)
 
+
 async def run_webhook_server():
-    """Запускает веб-сервер для вебхуков ЮKassa"""
+    print("🟡 Запуск минимального веб-сервера...")
+    from aiohttp import web
+
+    async def hello(request):
+        return web.Response(text="Hello from Bothost!")
+
     app = web.Application()
-    app.router.add_get('/test', test_handler)
-    app.router.add_post('/webhook/yookassa', yookassa_webhook)
+    app.router.add_get('/', hello)
 
     port = int(os.getenv('PORT', 8080))
-
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"🚀 Веб-сервер запущен на порту {port}")
-
+    print(f"🚀 Минимальный сервер запущен на порту {port}")
     await asyncio.Event().wait()
 
 # ----------------------------------------------------------------------
