@@ -1508,15 +1508,6 @@ async def reminder_scheduler():
                     logging.error(f"Reminder error: {e}")
         await asyncio.sleep(60)
 
-# ----- Запуск -----
-#async def main():
-    #asyncio.create_task(reminder_scheduler())
-    #await bot.delete_webhook(drop_pending_updates=True)
-    #await dp.start_polling(bot)
-
-#if __name__ == "__main__":
-    #asyncio.run(main())
-# ... (импорты, работа с БД, ваши старые хендлеры) ...
 
 # ----------------------------------------------------------------------
 # ---------- НАСТРОЙКА ВЕБХУКА ДЛЯ ЮKASSA ----------
@@ -1525,8 +1516,6 @@ async def reminder_scheduler():
 from aiohttp import web
 import json
 
-async def test_handler(request):
-    return web.Response(text="Webhook server works!")
 
 async def yookassa_webhook(request):
     """Обработчик входящих уведомлений от ЮKassa."""
@@ -1564,33 +1553,38 @@ async def yookassa_webhook(request):
 
 
 async def run_webhook_server():
-    print("🟡 Запуск минимального веб-сервера...")
-    from aiohttp import web
-
-    async def hello(request):
-        return web.Response(text="Hello from Bothost!")
-
+    """Запускает веб-сервер для вебхуков ЮKassa (в главном потоке)"""
     app = web.Application()
-    app.router.add_get('/', hello)
+    app.router.add_post('/webhook/yookassa', yookassa_webhook)
 
     port = int(os.getenv('PORT', 8080))
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"🚀 Минимальный сервер запущен на порту {port}")
+    print(f"🚀 Веб-сервер для вебхуков запущен на порту {port}")
+
+    # Бесконечно ждём (сервер работает)
     await asyncio.Event().wait()
+
 
 # ----------------------------------------------------------------------
 # ---------- ЗАПУСК БОТА ----------
 # ----------------------------------------------------------------------
 
 async def main():
+    # Запускаем планировщик напоминаний
     asyncio.create_task(reminder_scheduler())
-    asyncio.create_task(run_webhook_server())  # ← теперь одна, правильная
+
+    # Запускаем веб-сервер для вебхуков (в главном потоке)
+    asyncio.create_task(run_webhook_server())
+
+    # Очищаем вебхук Telegram и запускаем бота в режиме Polling
     await bot.delete_webhook(drop_pending_updates=True)
     print("✅ Бот запущен в режиме Polling")
     await dp.start_polling(bot)
+
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
