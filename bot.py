@@ -1541,7 +1541,7 @@ async def yookassa_webhook(request):
                 supabase.table("consult_requests").insert({
                     "user_id": user_id,
                     "doctor_id": doctor_id,
-                    "status": "waiting_for_details",
+                    "status": "paid",
                     "payment_method": "yookassa_webhook"
                 }).execute()
                 await bot.send_message(user_id, "✅ Оплата за консультацию получена! Опишите проблему и пришлите фото.")
@@ -1552,10 +1552,20 @@ async def yookassa_webhook(request):
         return web.Response(status=500)
 
 
+async def test_handler(request):
+    """Тестовый маршрут для проверки работы веб-сервера"""
+    return web.Response(text="Webhook server is running! YooKassa webhook endpoint: /webhook/yookassa")
+
+
 async def run_webhook_server():
-    """Запускает веб-сервер для вебхуков ЮKassa (в главном потоке)"""
+    """Запускает веб-сервер для вебхуков ЮKassa"""
     app = web.Application()
-    app.router.add_post('/webhook/yookassa', yookassa_webhook)
+
+    # Тестовые маршруты для проверки
+    app.router.add_get('/', test_handler)
+    app.router.add_get('/test', test_handler)
+    app.router.add_get('/webhook/yookassa', test_handler)  # GET для проверки
+    app.router.add_post('/webhook/yookassa', yookassa_webhook)  # POST для вебхука
 
     port = int(os.getenv('PORT', 8080))
 
@@ -1564,6 +1574,8 @@ async def run_webhook_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"🚀 Веб-сервер для вебхуков запущен на порту {port}")
+    print(f"📍 Тестовый маршрут: https://bot-1779548695-8722-vetbotsovet.bothost.tech/test")
+    print(f"📍 Webhook URL: https://bot-1779548695-8722-vetbotsovet.bothost.tech/webhook/yookassa")
 
     # Бесконечно ждём (сервер работает)
     await asyncio.Event().wait()
