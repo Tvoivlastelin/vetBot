@@ -1536,8 +1536,7 @@ async def start_paid_consult(callback: CallbackQuery, state: FSMContext):
         "✅ **КОНСУЛЬТАЦИЯ АКТИВИРОВАНА!**\n\n"
         "Теперь опишите подробно проблему и отправьте ее в чат с ботом.\n\n"
         "📌 После описания вы сможете приложить фото (1-5).\n"
-        "Для завершения отправьте /finish_consult",
-        parse_mode="Markdown"
+        "Для завершения отправьте /finish_consult"
     )
     await callback.answer()
 
@@ -1592,8 +1591,7 @@ async def yookassa_webhook(request):
                     user_id,
                     "✅ **Оплата за консультацию получена!**\n\n"
                     "Нажмите на кнопку, чтобы начать описание проблемы:",
-                    reply_markup=kb,
-                    parse_mode="Markdown"
+                    reply_markup=kb
                 )
 
         return web.Response(status=200)
