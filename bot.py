@@ -1509,12 +1509,48 @@ async def reminder_scheduler():
         await asyncio.sleep(60)
 
 
+@dp.callback_query(F.data == "start_paid_consult")
+async def start_paid_consult(callback: CallbackQuery, state: FSMContext):
+    """Начало оплаченной консультации (по кнопке после вебхука)"""
+    user_id = callback.from_user.id
+
+    # Находим оплаченную консультацию без вопроса
+    result = supabase.table("consult_requests").select("id, doctor_id").eq("user_id", user_id).eq("status", "paid").is_(
+        "question", "null").execute()
+
+    if not result.data:
+        await callback.message.answer("❌ Не найдена оплаченная консультация.")
+        await callback.answer()
+        return
+
+    consult_id = result.data[0]["id"]
+    doctor_id = result.data[0]["doctor_id"]
+
+    # Сохраняем данные (как в use_free_consult)
+    await state.update_data(selected_doctor_id=doctor_id)
+    await state.update_data(consult_id=consult_id)
+    await state.update_data(photos=[])
+    await state.set_state(ConsultStates.waiting_for_question)
+
+    await callback.message.answer(
+        "✅ **КОНСУЛЬТАЦИЯ АКТИВИРОВАНА!**\n\n"
+        "Теперь опишите подробно проблему и отправьте ее в чат с ботом.\n\n"
+        "📌 После описания вы сможете приложить фото (1-5).\n"
+        "Для завершения отправьте /finish_consult",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+# ----------------------------------------------------------------------
+# ---------- НАСТРОЙКА ВЕБХУКА ДЛЯ ЮKASSA ----------
+# ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
 # ---------- НАСТРОЙКА ВЕБХУКА ДЛЯ ЮKASSA ----------
 # ----------------------------------------------------------------------
 
 from aiohttp import web
 import json
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 async def yookassa_webhook(request):
@@ -1538,13 +1574,27 @@ async def yookassa_webhook(request):
 
             elif payment_type == 'consult':
                 doctor_id = int(metadata.get('doctor_id', 1))
+
+                # Создаём заявку со статусом paid
                 supabase.table("consult_requests").insert({
                     "user_id": user_id,
                     "doctor_id": doctor_id,
                     "status": "paid",
                     "payment_method": "yookassa_webhook"
                 }).execute()
-                await bot.send_message(user_id, "✅ Оплата за консультацию получена! Опишите проблему и пришлите фото.")
+
+                # Кнопка для начала консультации
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📝 Начать консультацию", callback_data="start_paid_consult")]
+                ])
+
+                await bot.send_message(
+                    user_id,
+                    "✅ **Оплата за консультацию получена!**\n\n"
+                    "Нажмите на кнопку, чтобы начать описание проблемы:",
+                    reply_markup=kb,
+                    parse_mode="Markdown"
+                )
 
         return web.Response(status=200)
     except Exception as e:
@@ -1564,8 +1614,8 @@ async def run_webhook_server():
     # Тестовые маршруты для проверки
     app.router.add_get('/', test_handler)
     app.router.add_get('/test', test_handler)
-    app.router.add_get('/webhook/yookassa', test_handler)  # GET для проверки
-    app.router.add_post('/webhook/yookassa', yookassa_webhook)  # POST для вебхука
+    app.router.add_get('/webhook/yookassa', test_handler)
+    app.router.add_post('/webhook/yookassa', yookassa_webhook)
 
     port = 3000
 
@@ -1577,9 +1627,7 @@ async def run_webhook_server():
     print(f"📍 Тестовый маршрут: https://bot-1779548695-8722-vetbotsovet.bothost.tech/test")
     print(f"📍 Webhook URL: https://bot-1779548695-8722-vetbotsovet.bothost.tech/webhook/yookassa")
 
-    # Бесконечно ждём (сервер работает)
     await asyncio.Event().wait()
-
 
 # ----------------------------------------------------------------------
 # ---------- ЗАПУСК БОТА ----------
