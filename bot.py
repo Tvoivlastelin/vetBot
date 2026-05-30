@@ -1567,7 +1567,7 @@ async def run_webhook_server():
     app.router.add_get('/webhook/yookassa', test_handler)  # GET для проверки
     app.router.add_post('/webhook/yookassa', yookassa_webhook)  # POST для вебхука
 
-    port = int(os.getenv('PORT', 8080))
+    port = 3000
 
     runner = web.AppRunner(app)
     await runner.setup()
