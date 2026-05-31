@@ -169,15 +169,21 @@ def get_referral_stats(user_id: int) -> dict:
 
 
 def activate_subscription(user_id: int, days: int = 30):
-    new_end = datetime.now() + timedelta(days=days)
-    supabase.table("users").update({"subscription_end": new_end.isoformat()}).eq("user_id", user_id).execute()
-
-    # Даём 1 бесплатную консультацию при активации подписки
     user = get_user(user_id)
-    current_free = user.get("free_consultations", 0)
-    supabase.table("users").update({"free_consultations": current_free + 1}).eq("user_id", user_id).execute()
 
-    # Реферальная логика (оставляем как было)
+    # Защита от двойной активации
+    current_end = user.get("subscription_end")
+    if current_end and datetime.fromisoformat(current_end.replace('Z', '+00:00')) > datetime.now():
+        print(f"⚠️ Подписка у пользователя {user_id} уже активна, пропускаем")
+        return
+
+    new_end = datetime.now() + timedelta(days=days)
+    supabase.table("users").update({
+        "subscription_end": new_end.isoformat(),
+        "free_consultations": 1  # устанавливаем 1, а не прибавляем
+    }).eq("user_id", user_id).execute()
+
+    # Реферальная логика
     if user and user.get("referrer_id"):
         referrer_id = user["referrer_id"]
         supabase.table("users").update({"referrer_activated": True}).eq("user_id", user_id).execute()
@@ -190,7 +196,8 @@ def activate_subscription(user_id: int, days: int = 30):
                 new_end_referrer = max(current_end, datetime.now(current_end.tzinfo)) + timedelta(days=90)
             else:
                 new_end_referrer = datetime.now() + timedelta(days=90)
-            supabase.table("users").update({"subscription_end": new_end_referrer.isoformat()}).eq("user_id", referrer_id).execute()
+            supabase.table("users").update({"subscription_end": new_end_referrer.isoformat()}).eq("user_id",
+                                                                                                  referrer_id).execute()
 
 def create_yookassa_payment(user_id: int, amount: float, description: str, payment_type: str = "subscription") -> tuple:
     """Создаёт платёж в ЮKassa и возвращает (url, payment_id)"""
